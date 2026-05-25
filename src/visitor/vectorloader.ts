@@ -25,7 +25,7 @@ import { packBools } from '../util/bit.js';
 import { encodeUtf8 } from '../util/utf8.js';
 import { Int64, Int128 } from '../util/int.js';
 import { UnionMode, DateUnit, MetadataVersion, IntervalUnit } from '../enum.js';
-import { toArrayBufferView } from '../util/buffer.js';
+import { toArrayBufferView, toBigInt64Array } from '../util/buffer.js';
 import { BufferRegion, FieldNode } from '../ipc/metadata/message.js';
 import { toIntervalDayTimeInt32Array, toIntervalMonthDayNanoInt32Array } from '../util/interval.js';
 
@@ -76,7 +76,7 @@ export class VectorLoader extends Visitor {
         return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), data: this.readData(type) });
     }
     public visitLargeUtf8<T extends type.LargeUtf8>(type: T, { length, nullCount } = this.nextFieldNode()) {
-        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), data: this.readData(type) });
+        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readLargeOffsets(type), data: this.readData(type) });
     }
     public visitUtf8View<T extends type.Utf8View>(type: T, { length, nullCount } = this.nextFieldNode()) {
         const nullBitmap = this.readNullBitmap(type, nullCount);
@@ -95,7 +95,7 @@ export class VectorLoader extends Visitor {
         return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), data: this.readData(type) });
     }
     public visitLargeBinary<T extends type.LargeBinary>(type: T, { length, nullCount } = this.nextFieldNode()) {
-        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), data: this.readData(type) });
+        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readLargeOffsets(type), data: this.readData(type) });
     }
     public visitBinaryView<T extends type.BinaryView>(type: T, { length, nullCount } = this.nextFieldNode()) {
         const nullBitmap = this.readNullBitmap(type, nullCount);
@@ -129,7 +129,7 @@ export class VectorLoader extends Visitor {
         return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), 'child': this.visit(type.children[0]) });
     }
     public visitLargeList<T extends type.LargeList>(type: T, { length, nullCount } = this.nextFieldNode()) {
-        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readOffsets(type), 'child': this.visit(type.children[0]) });
+        return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), valueOffsets: this.readLargeOffsets(type), 'child': this.visit(type.children[0]) });
     }
     public visitStruct<T extends type.Struct>(type: T, { length, nullCount } = this.nextFieldNode()) {
         return makeData({ type, length, nullCount, nullBitmap: this.readNullBitmap(type, nullCount), children: this.visitMany(type.children) });
@@ -170,6 +170,24 @@ export class VectorLoader extends Visitor {
         return nullCount > 0 && this.readData(type, buffer) || new Uint8Array(0);
     }
     protected readOffsets<T extends DataType>(type: T, buffer?: BufferRegion) { return this.readData(type, buffer); }
+    // Rebases int64 offsets to start at 0 so downstream `bigIntToNumber` narrowing
+    // always succeeds for spec-conforming wire input. Conforming producers may
+    // pre-shift offsets on sliced views, putting absolute values past 2^53; after
+    // rebasing, in-memory offsets are bounded by the child buffer's element count
+    // (which the JS runtime can allocate anyway). Genuinely too-large wire inputs
+    // fail honestly at child-buffer allocation rather than at offset narrowing.
+    protected readLargeOffsets<T extends DataType>(type: T, buffer?: BufferRegion): BigInt64Array {
+        const offsets: BigInt64Array = toBigInt64Array(this.readOffsets(type, buffer));
+        if (offsets.length === 0 || offsets[0] === BigInt(0)) {
+            return offsets;
+        }
+        const base = offsets[0];
+        const rebased = new BigInt64Array(offsets.length);
+        for (let i = 0; i < offsets.length; i++) {
+            rebased[i] = offsets[i] - base;
+        }
+        return rebased;
+    }
     protected readTypeIds<T extends DataType>(type: T, buffer?: BufferRegion) { return this.readData(type, buffer); }
     protected readData<T extends DataType>(_type: T, { length, offset } = this.nextBufferRange()) {
         return this.bytes.subarray(offset, offset + length);
