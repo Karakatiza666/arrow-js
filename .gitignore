@@ -94,3 +94,6 @@ dev/release/rat.xml
 
 # Release
 dev/release/.env
+
+# feldera-web-console-dist: ship the prebuilt browser-ESM dist for git-dep consumption
+!/dist/
